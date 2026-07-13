@@ -1,0 +1,87 @@
+# Membership Price Collection
+
+import pandas as pd
+import numpy as np
+
+# Load your existing datasets
+gym_df = pd.read_csv("florida_gym_locations.csv")
+demo_df = pd.read_csv("florida_county_demographics.csv")
+
+RESEARCHED_PRICES = {
+    # "CountyName": price_in_usd,
+    "Miami-Dade": 44.99,
+    "Broward": 42.99,
+    "Palm Beach": 41.99,
+    "Orange": 39.99,
+    "Hillsborough": 38.99,
+    "Pinellas": 37.99,
+    "Duval": 36.99,
+    # ... add every county you actually researched here
+}
+
+
+CHAIN_ANCHOR_PRICE = {
+    "LA Fitness": 40.0,
+    "Planet Fitness": 17.5,
+    "Orange Theory Fitness": 175.0,
+    "Gold's Gym": 45.0,
+    "24 Hour Fitness": np.nan,  # no FL presence, excluded
+}
+
+
+chain_counts = (
+    gym_df[gym_df["GymChain"] != "24 Hour Fitness"]
+    .groupby(["CountyName", "GymChain"])
+    .size()
+    .reset_index(name="Count")
+)
+
+def blended_anchor(county):
+    sub = chain_counts[chain_counts["CountyName"] == county]
+    if sub.empty:
+        return np.nan
+    weights = sub["Count"].values
+    prices = sub["GymChain"].map(CHAIN_ANCHOR_PRICE).values
+    mask = ~np.isnan(prices)
+    if mask.sum() == 0:
+        return np.nan
+    return np.average(prices[mask], weights=weights[mask])
+
+demo_df["BlendedAnchorPrice"] = demo_df["CountyName"].apply(blended_anchor)
+
+
+# Merge in your manually researched prices
+
+demo_df["MembershipPrice"] = demo_df["CountyName"].map(RESEARCHED_PRICES)
+
+
+known_mask = demo_df["MembershipPrice"].notna()
+known_df = demo_df[known_mask].copy()
+
+# Normalize income and density so they're comparable on the same scale
+for col in ["MedianHouseholdIncome", "PopulationDensity"]:
+    demo_df[f"{col}_z"] = (demo_df[col] - demo_df[col].mean()) / demo_df[col].std()
+
+known_df = demo_df[known_mask].copy()
+
+def estimate_price(row):
+    if pd.notna(row["MembershipPrice"]):
+        return row["MembershipPrice"]
+    # Euclidean distance in (income_z, density_z) space to all known counties
+    dists = np.sqrt(
+        (known_df["MedianHouseholdIncome_z"] - row["MedianHouseholdIncome_z"]) ** 2
+        + (known_df["PopulationDensity_z"] - row["PopulationDensity_z"]) ** 2
+    )
+    nearest_idx = dists.nsmallest(3).index  # 3 nearest comparable counties
+    return known_df.loc[nearest_idx, "MembershipPrice"].mean()
+
+demo_df["MembershipPrice"] = demo_df.apply(estimate_price, axis=1)
+demo_df["PriceSource"] = np.where(known_mask, "Researched", "Estimated (nearest-comparable)")
+
+# 6. Output final CSV
+final_price_df = demo_df[["CountyName", "MembershipPrice"]].round(2)
+final_price_df.to_csv("fl_membership_prices.csv", index=False)
+
+
+from google.colab import files
+files.download("fl_membership_prices.csv")
